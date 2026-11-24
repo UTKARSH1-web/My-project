@@ -126,6 +126,11 @@ public class Minimap : MonoBehaviour
             (player.position.x / maze.cellSize + 0.5f) * cellWidth,
             (player.position.z / maze.cellSize + 0.5f) * cellHeight
         );
+        playerMarker.localEulerAngles = new Vector3(
+            0f,
+            0f,
+            -player.eulerAngles.y
+        );
     }
 
     void Start()

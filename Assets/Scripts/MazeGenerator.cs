@@ -28,6 +28,7 @@ public class MazeGenerator : MonoBehaviour
     public GameObject zombiePrefab;
     public GameObject witchPrefab;
     public GameObject boomerPrefab;
+    public GameObject splitterPrefab;
 
     [Header("Enemy Spawning")]
     public int cellsPerZombie = 8;
@@ -63,6 +64,9 @@ public class MazeGenerator : MonoBehaviour
 
     void Start()
     {
+        width = PlayerPrefs.GetInt("MazeWidth", width);
+        height = PlayerPrefs.GetInt("MazeHeight", height);
+        seed = PlayerPrefs.GetInt("MazeSeed", seed);
         GameObject mazeWalls = new GameObject("MazeWalls");
         wallObjects = new GameObject[width, height, 4];
         cellWalls = new bool[width, height, 4];
@@ -72,6 +76,7 @@ public class MazeGenerator : MonoBehaviour
         navMeshSurface = GetComponentInChildren<NavMeshSurface>();
 
         CreateMaze(mazeWalls);
+        CreateRoof();
         GenerateMaze();
         VerifyMaze();
         OpenWalls();
@@ -83,6 +88,7 @@ public class MazeGenerator : MonoBehaviour
         SpawnZombies();
         SpawnEnemy(witchPrefab, specialEnemyDistance);
         SpawnEnemy(boomerPrefab, specialEnemyDistance);
+        SpawnEnemy(splitterPrefab, specialEnemyDistance);
         player.SetActive(true);
     }
 
@@ -346,7 +352,24 @@ public class MazeGenerator : MonoBehaviour
 
         Instantiate(prefab, spawnPosition, Quaternion.identity);
     }
+    void CreateRoof()
+    {
+        GameObject roof = GameObject.CreatePrimitive(PrimitiveType.Cube);
 
+        roof.name = "MazeRoof";
+
+        roof.transform.position = new Vector3(
+            (width - 1) * cellSize / 2f,
+            wallHeight,
+            (height - 1) * cellSize / 2f
+        );
+
+        roof.transform.localScale = new Vector3(
+            width * cellSize,
+            0.2f,
+            height * cellSize
+        );
+    }
     void CreateWall(Vector3 position, Vector3 scale, Transform parent, int x, int z, int loc)
     {
         GameObject wall = GameObject.CreatePrimitive(PrimitiveType.Cube);

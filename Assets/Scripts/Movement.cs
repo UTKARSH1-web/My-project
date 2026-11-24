@@ -8,7 +8,6 @@ public class Movement : MonoBehaviour
     public InputActionAsset playerControls;
 
     private InputAction moveAction;
-    private InputAction jumpAction;
     private InputAction lookAction;
 
     [Header("Movement")]
@@ -16,7 +15,6 @@ public class Movement : MonoBehaviour
     public float playerSpeed = 5f;
     public float slowWalkSpeed = 2f;
     public float runSpeed = 8f;
-    public float jumpHeight = 1.5f;
     public float gravity = -9.81f;
 
     [Header("Camera")]
@@ -53,7 +51,6 @@ public class Movement : MonoBehaviour
     private void Awake()
     {
         moveAction = playerControls.FindAction("Player/Move");
-        jumpAction = playerControls.FindAction("Player/Jump");
         lookAction = playerControls.FindAction("Player/Look");
 
         if (controller == null)
@@ -66,14 +63,12 @@ public class Movement : MonoBehaviour
     private void OnEnable()
     {
         moveAction?.Enable();
-        jumpAction?.Enable();
         lookAction?.Enable();
     }
 
     private void OnDisable()
     {
         moveAction?.Disable();
-        jumpAction?.Disable();
         lookAction?.Disable();
     }
 
@@ -190,13 +185,6 @@ public class Movement : MonoBehaviour
             move * currentSpeed * Time.deltaTime
         );
 
-        // JUMP
-        if (isGrounded && jumpAction.WasPressedThisFrame())
-        {
-            velocity.y = Mathf.Sqrt(
-                jumpHeight * -2f * gravity
-            );
-        }
 
         // GRAVITY
         velocity.y += gravity * Time.deltaTime;
@@ -211,14 +199,13 @@ public class Movement : MonoBehaviour
 
         displacement.y = 0f;
 
-        bool isMoving =
-            input.sqrMagnitude > 0.01f &&
-            displacement.sqrMagnitude > 0.000001f;
+        bool isMoving = input.sqrMagnitude > 0.01f;
 
         bool isOnGround = controller.isGrounded;
 
         if (isMoving && isOnGround && !isSlowWalking)
         {
+            
             float stepInterval = isRunning
                 ? runStepInterval
                 : walkStepInterval;
@@ -248,7 +235,7 @@ public class Movement : MonoBehaviour
         }
         else
         {
-            footstepTimer = 0f;
+            footstepTimer = walkStepInterval;
         }
     }
 
@@ -261,20 +248,16 @@ public class Movement : MonoBehaviour
             return;
         }
 
-        int randomIndex =
-            UnityEngine.Random.Range(
-                0,
-                footstepClips.Length
-            );
+        int randomIndex = UnityEngine.Random.Range(
+            0,
+            footstepClips.Length
+        );
 
-        AudioClip selectedClip =
-            footstepClips[randomIndex];
+        AudioClip selectedClip = footstepClips[randomIndex];
 
         if (selectedClip != null)
         {
-            footstepAudioSource.PlayOneShot(
-                selectedClip
-            );
+            footstepAudioSource.PlayOneShot(selectedClip);
         }
     }
 }

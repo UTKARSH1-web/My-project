@@ -1,3 +1,4 @@
+using UnityEngine.SceneManagement;
 using UnityEngine;
 
 public class ExitTrigger : MonoBehaviour
@@ -11,6 +12,7 @@ public class ExitTrigger : MonoBehaviour
             if (movement != null && movement.hasKey)
             {
                 Debug.Log("You escaped the maze!");
+                SceneManager.LoadScene("End Screen");
             }
             else
             {

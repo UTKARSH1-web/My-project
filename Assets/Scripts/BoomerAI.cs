@@ -1,94 +1,72 @@
 using UnityEngine;
 using UnityEngine.AI;
 
+[RequireComponent(typeof(NavMeshAgent))]
 public class BoomerAI : MonoBehaviour
 {
     [Header("References")]
     public Transform player;
+    public GameObject explosionEffect;
 
     [Header("Movement")]
     public float patrolSpeed = 2f;
     public float chaseSpeed = 3.5f;
     public float chargeSpeed = 9f;
-    public float rotationSpeed = 360f;
-
-    [Header("Patrol")]
-    public float patrolRadius = 12f;
-    public float directionChangeTime = 3f;
-
-    [Header("Vision")]
-    public float detectionRange = 12f;
-
-    [Range(0f, 360f)]
-    public float fieldOfView = 90f;
-
-    [Header("Investigation")]
-    public float investigateDuration = 6f;
     public float investigateSpeed = 2.5f;
+    public float patrolRadius = 12f;
 
-    [Header("Charge")]
+    [Header("Detection")]
+    public float detectionRange = 12f;
+    [Range(0f, 360f)] public float fieldOfView = 90f;
+    public float investigateDuration = 6f;
     public float chargeRange = 7f;
 
     [Header("Explosion")]
     public float explosionDistance = 2.2f;
     public float explosionRadius = 3f;
     public int explosionDamage = 30;
-    public GameObject explosionEffect;
 
-    [Header("NavMesh Pathfinding")]
-    public float repathInterval = 0.25f;
-    public float arrivalDistance = 0.6f;
+    [Header("NavMesh")]
     public float navMeshSpawnSearch = 3f;
+    public float repathInterval = 0.25f;
+    public bool showLogs = true;
 
-    // =====================================
-    // AI STATES
-    // =====================================
+    private enum State { Patrol, Chase, Investigate }
+    private State state = State.Patrol;
 
-    private enum AIState
+    private static readonly Vector2Int[] Directions =
     {
-        Patrol,
-        Chase,
-        Investigate
-    }
-
-    private AIState currentState = AIState.Patrol;
+        Vector2Int.up, Vector2Int.right,
+        Vector2Int.down, Vector2Int.left
+    };
 
     private NavMeshAgent agent;
-    private NavMeshPath testPath;
+    private NavMeshPath path;
+    private MazeGenerator maze;
     private Transform mazeWalls;
-
-    private Vector3 homePosition;
+    private Vector3 patrolTarget;
     private Vector3 lastKnownPosition;
+    private Vector2Int previousCell = new Vector2Int(-1, -1);
 
+    private float nextInitTime;
+    private float nextPathTime;
     private float nextPatrolTime;
-    private float nextRepathTime;
-    private float nextInitializationAttempt;
-    private float investigateTimer;
-
-    private bool ready = false;
-    private bool hasExploded = false;
-    private bool investigatePathNeeded = false;
-
-    // =====================================
-    // INITIALIZATION
-    // =====================================
+    private float patrolStartTime;
+    private float investigationEndTime;
+    private float lastSeenTime;
+    private bool ready;
+    private bool exploded;
+    private bool hasPatrolTarget;
+    private bool needsInvestigationPath;
+    private bool warnedNoMesh;
+    private bool wasCharging;
+    private float nextWarningTime;
 
     private void Awake()
     {
         agent = GetComponent<NavMeshAgent>();
-        testPath = new NavMeshPath();
-
-        if (agent != null)
-        {
-            // Wait until procedural NavMesh is ready
-            agent.enabled = false;
-        }
-        else
-        {
-            Debug.LogError(
-                "Boomer needs a NavMeshAgent component!"
-            );
-        }
+        path = new NavMeshPath();
+        agent.enabled = false;
     }
 
     private void OnEnable()
@@ -101,103 +79,93 @@ public class BoomerAI : MonoBehaviour
         Movement.OnPlayerFootstep -= HearFootstep;
     }
 
-    private void Start()
-    {
-        homePosition = transform.position;
-    }
-
-    // =====================================
-    // MAIN AI DECISION MAKING
-    // =====================================
-
     private void Update()
     {
-        if (hasExploded)
-            return;
+        if (exploded) return;
 
         if (!ready)
         {
-            TryInitializeAgent();
+            ConnectToNavMesh();
             return;
         }
 
-        if (agent == null ||
-            !agent.enabled ||
-            !agent.isOnNavMesh)
+        if (!agent.enabled || !agent.isOnNavMesh)
         {
             ready = false;
+            if (agent.enabled) agent.enabled = false;
             return;
         }
 
-        // Check player visibility
-        bool playerVisible = CanSeePlayer();
+        FindPlayer();
 
-        if (playerVisible)
+        // Explosion works at close range even if the player is behind Boomer.
+        if (player != null && HorizontalDistance(player.position) <= explosionDistance
+            && !WallBetweenPlayer())
+        {
+            Explode();
+            return;
+        }
+
+        if (CanSeePlayer())
         {
             lastKnownPosition = player.position;
-            investigateTimer = investigateDuration;
-
-            ChangeState(AIState.Chase);
+            lastSeenTime = Time.time;
+            ChangeState(State.Chase);
         }
-        else if (currentState == AIState.Chase)
+        else if (state == State.Chase && Time.time - lastSeenTime > 1f)
         {
-            // Lost sight of player
-            BeginInvestigation(lastKnownPosition);
+            StartInvestigation(lastKnownPosition);
         }
 
-        switch (currentState)
-        {
-            case AIState.Patrol:
-                Patrol();
-                break;
-
-            case AIState.Chase:
-                ChasePlayer();
-                break;
-
-            case AIState.Investigate:
-                InvestigatePosition();
-                break;
-        }
+        if (state == State.Chase) Chase();
+        else if (state == State.Investigate) Investigate();
+        else Patrol();
     }
 
-    // =====================================
-    // CONNECT TO PROCEDURAL NAVMESH
-    // =====================================
-
-    private void TryInitializeAgent()
+    private void FindPlayer()
     {
-        if (agent == null ||
-            Time.time < nextInitializationAttempt)
+        if (player != null && player.gameObject.activeInHierarchy &&
+            player.GetComponentInParent<Movement>() != null) return;
+
+        if (maze == null) maze = FindFirstObjectByType<MazeGenerator>();
+        if (maze != null && maze.player != null)
         {
+            player = maze.player.transform;
             return;
         }
 
-        nextInitializationAttempt = Time.time + 0.5f;
+        Movement movement = FindFirstObjectByType<Movement>();
+        if (movement != null) player = movement.transform;
+    }
+
+    private void ConnectToNavMesh()
+    {
+        if (Time.time < nextInitTime) return;
+        nextInitTime = Time.time + 0.5f;
+
+        if (maze == null) maze = FindFirstObjectByType<MazeGenerator>();
 
         NavMeshHit hit;
-
-        // Find nearby walkable position
-        if (!NavMesh.SamplePosition(
-            transform.position,
-            out hit,
-            navMeshSpawnSearch,
-            NavMesh.AllAreas
-        ))
+        NavMeshQueryFilter filter = new NavMeshQueryFilter
         {
+            agentTypeID = agent.agentTypeID,
+            areaMask = agent.areaMask
+        };
+
+        if (!NavMesh.SamplePosition(transform.position, out hit,
+            navMeshSpawnSearch, filter))
+        {
+            if (!warnedNoMesh && Time.time > 3f)
+            {
+                Debug.LogWarning(name + ": No NavMesh nearby. Check Agent Type and maze build.");
+                warnedNoMesh = true;
+            }
             return;
         }
 
-        if (agent.enabled)
-            agent.enabled = false;
-
-        // Place Boomer near the walkable surface
-        transform.position =
-            hit.position +
-            Vector3.up * agent.baseOffset;
-
+        agent.enabled = false;
+        transform.position = hit.position + Vector3.up * agent.baseOffset;
         agent.enabled = true;
-
         if (!agent.isOnNavMesh)
         {
             agent.enabled = false;
@@ -205,586 +173,302 @@ public class BoomerAI : MonoBehaviour
         }
 
         agent.speed = patrolSpeed;
-        agent.angularSpeed = rotationSpeed;
-        agent.acceleration = 12f;
+        agent.acceleration = 25f;
+        agent.angularSpeed = 720f;
         agent.stoppingDistance = 0.15f;
-        agent.autoBraking = true;
         agent.autoRepath = true;
-
-        homePosition = agent.nextPosition;
-
+        agent.autoBraking = true;
         ready = true;
         nextPatrolTime = 0f;
-        nextRepathTime = 0f;
-
-        Debug.Log(
-            "Boomer connected to NavMesh!"
-        );
+        FindPlayer();
+        Log("connected to NavMesh; starting patrol");
     }
 
-    // =====================================
-    // STATE MANAGEMENT
-    // =====================================
-
-    private void ChangeState(AIState newState)
+    private bool MoveTo(Vector3 position, float speed, float searchRadius = 1.5f)
     {
-        if (currentState == newState)
-            return;
-
-        currentState = newState;
-        nextRepathTime = 0f;
-
-        if (ready &&
-            agent.enabled &&
-            agent.isOnNavMesh)
-        {
-            agent.isStopped = false;
-            agent.updateRotation = true;
-            agent.ResetPath();
-        }
-
-        Debug.Log(
-            "Boomer State: " + currentState
-        );
-    }
-
-    // =====================================
-    // NAVMESH PATHFINDING
-    // =====================================
-
-    private bool MoveToPosition(
-        Vector3 destination,
-        float speed,
-        float sampleRadius = 1.5f
-    )
-    {
-        if (!ready ||
-            !agent.enabled ||
-            !agent.isOnNavMesh)
-        {
-            return false;
-        }
+        if (!ready || !agent.enabled || !agent.isOnNavMesh) return false;
 
         NavMeshHit hit;
-
-        if (!NavMesh.SamplePosition(
-            destination,
-            out hit,
-            sampleRadius,
-            agent.areaMask
-        ))
+        NavMeshQueryFilter filter = new NavMeshQueryFilter
         {
-            return false;
-        }
+            agentTypeID = agent.agentTypeID,
+            areaMask = agent.areaMask
+        };
 
-        // Avoid selecting another floor
-        if (Mathf.Abs(
-            hit.position.y - agent.nextPosition.y
-        ) > 1.5f)
-        {
+        if (!NavMesh.SamplePosition(position, out hit, searchRadius, filter))
             return false;
-        }
-
-        // Verify complete reachable path
-        if (!agent.CalculatePath(
-            hit.position,
-            testPath
-        ))
-        {
+        if (Mathf.Abs(hit.position.y - agent.nextPosition.y) > 1.5f)
             return false;
-        }
-
-        if (testPath.status !=
-            NavMeshPathStatus.PathComplete)
-        {
+        if (!agent.CalculatePath(hit.position, path) ||
+            path.status != NavMeshPathStatus.PathComplete)
             return false;
-        }
 
         agent.speed = speed;
-        agent.angularSpeed = rotationSpeed;
         agent.isStopped = false;
         agent.updateRotation = true;
-
-        return agent.SetDestination(hit.position);
-    }
-
-    private bool HasReachedDestination()
-    {
-        if (agent.pathPending)
-            return false;
-
-        if (!agent.hasPath)
-            return true;
-
-        return !float.IsInfinity(agent.remainingDistance) &&
-            agent.remainingDistance <= Mathf.Max(
-                arrivalDistance,
-                agent.stoppingDistance + 0.1f
-            );
-    }
-
-    // =====================================
-    // RANDOM NAVMESH PATROL
-    // =====================================
-
-    private void Patrol()
-    {
-        agent.speed = patrolSpeed;
-        agent.isStopped = false;
-        agent.updateRotation = true;
-
-        // Continue following current path
-        if (!HasReachedDestination())
-            return;
-
-        if (Time.time < nextPatrolTime)
-            return;
-
-        // Find a random reachable location
-        for (int i = 0; i < 30; i++)
-        {
-            Vector2 random =
-                UnityEngine.Random.insideUnitCircle
-                * patrolRadius;
-
-            Vector3 candidate =
-                homePosition +
-                new Vector3(
-                    random.x,
-                    0f,
-                    random.y
-                );
-
-            if ((candidate - agent.nextPosition)
-                .sqrMagnitude < 4f)
-            {
-                continue;
-            }
-
-            if (MoveToPosition(
-                candidate,
-                patrolSpeed
-            ))
-            {
-                nextPatrolTime =
-                    Time.time +
-                    Mathf.Max(
-                        0.2f,
-                        directionChangeTime
-                    );
-
-                return;
-            }
-        }
-
-        // Retry if no valid patrol point
-        nextPatrolTime = Time.time + 1f;
-    }
-
-    // =====================================
-    // MAZE WALL DETECTION
-    // =====================================
-
-    private bool WallBetween(
-        Vector3 start,
-        Vector3 end
-    )
-    {
-        // MazeGenerator creates MazeWalls
-        if (mazeWalls == null)
-        {
-            GameObject walls =
-                GameObject.Find("MazeWalls");
-
-            if (walls != null)
-            {
-                mazeWalls = walls.transform;
-            }
-        }
-
-        if (mazeWalls == null)
-            return false;
-
-        Vector3 direction = end - start;
-        float distance = direction.magnitude;
-
-        if (distance < 0.001f)
-            return false;
-
-        RaycastHit[] hits = Physics.RaycastAll(
-            start,
-            direction.normalized,
-            distance,
-            ~0,
-            QueryTriggerInteraction.Ignore
-        );
-
-        foreach (RaycastHit hit in hits)
-        {
-            if (hit.collider != null &&
-                hit.collider.transform.IsChildOf(
-                    mazeWalls
-                ))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // =====================================
-    // PLAYER VISION
-    // =====================================
-
-    private bool CanSeePlayer()
-    {
-        if (player == null)
-            return false;
-
-        Vector3 origin =
-            transform.position +
-            Vector3.up * 0.5f;
-
-        Vector3 destination =
-            player.position +
-            Vector3.up * 0.5f;
-
-        Vector3 direction =
-            destination - origin;
-
-        float distance = direction.magnitude;
-
-        // Detection range
-        if (distance > detectionRange)
-            return false;
-
-        // Field of view
-        Vector3 horizontal = direction;
-        horizontal.y = 0f;
-
-        if (horizontal.sqrMagnitude > 0.0001f)
-        {
-            float angle = Vector3.Angle(
-                transform.forward,
-                horizontal
-            );
-
-            if (angle > fieldOfView * 0.5f)
-                return false;
-        }
-
-        // Cannot see player through maze walls
-        if (WallBetween(origin, destination))
-            return false;
-
+        if (!agent.SetDestination(hit.position)) return false;
+        patrolTarget = hit.position;
         return true;
     }
 
-    // =====================================
-    // FOOTSTEP HEARING
-    // =====================================
-
-    private void HearFootstep(
-        Vector3 soundPosition,
-        float soundRadius
-    )
+    private void ChangeState(State newState)
     {
-        if (player == null ||
-            hasExploded ||
-            !ready)
-        {
-            return;
-        }
-
-        // Visible player takes priority
-        if (CanSeePlayer())
-            return;
-
-        float distance = Vector3.Distance(
-            transform.position,
-            soundPosition
-        );
-
-        if (distance > soundRadius)
-            return;
-
-        BeginInvestigation(soundPosition);
-
-        Debug.Log(
-            "Boomer heard footsteps! Investigating..."
-        );
+        if (state == newState) return;
+        state = newState;
+        if (newState != State.Chase) wasCharging = false;
+        hasPatrolTarget = false;
+        nextPathTime = 0f;
+        agent.isStopped = false;
+        agent.updateRotation = true;
+        agent.ResetPath();
+        Log("State: " + state);
     }
 
-    // =====================================
-    // CHASE + FAST CHARGE
-    // =====================================
-
-    private void ChasePlayer()
+    private Vector2Int CurrentCell()
     {
-        if (player == null)
-            return;
-
-        Vector3 difference =
-            player.position - transform.position;
-
-        difference.y = 0f;
-
-        float distance = difference.magnitude;
-
-        // Explode only when close and visible
-        if (distance <= explosionDistance &&
-            !WallBetween(
-                transform.position + Vector3.up * 0.5f,
-                player.position + Vector3.up * 0.5f
-            ))
-        {
-            Explode();
-            return;
-        }
-
-        float currentSpeed = chaseSpeed;
-
-        // SPECIAL ABILITY: FAST CHARGE
-        if (distance <= chargeRange)
-        {
-            currentSpeed = chargeSpeed;
-        }
-
-        agent.speed = currentSpeed;
-
-        if (Time.time < nextRepathTime)
-            return;
-
-        nextRepathTime =
-            Time.time +
-            Mathf.Max(
-                0.1f,
-                repathInterval
-            );
-
-        // Follow actual maze corridors
-        MoveToPosition(
-            player.position,
-            currentSpeed
-        );
+        return new Vector2Int(
+            Mathf.RoundToInt(agent.nextPosition.x / maze.cellSize),
+            Mathf.RoundToInt(agent.nextPosition.z / maze.cellSize));
     }
 
-    // =====================================
-    // INVESTIGATION
-    // =====================================
-
-    private void BeginInvestigation(
-        Vector3 position
-    )
+    private bool InMaze(Vector2Int cell)
     {
-        lastKnownPosition = position;
-        investigateTimer = investigateDuration;
-        investigatePathNeeded = true;
-
-        ChangeState(AIState.Investigate);
+        return cell.x >= 0 && cell.y >= 0 &&
+            cell.x < maze.width && cell.y < maze.height;
     }
 
-    private void InvestigatePosition()
+    private bool ChooseCorridor()
     {
-        investigateTimer -= Time.deltaTime;
+        if (maze == null || maze.cellWalls == null || maze.cellSize <= 0f)
+            return false;
 
-        // Return to patrol after investigation
-        if (investigateTimer <= 0f)
+        Vector2Int cell = CurrentCell();
+        if (!InMaze(cell)) return false;
+
+        int randomStart = Random.Range(0, 4);
+        for (int pass = 0; pass < 2; pass++)
         {
-            investigatePathNeeded = false;
-
-            ChangeState(AIState.Patrol);
-            nextPatrolTime = 0f;
-
-            return;
-        }
-
-        if (investigatePathNeeded &&
-            Time.time >= nextRepathTime)
-        {
-            nextRepathTime =
-                Time.time +
-                Mathf.Max(
-                    0.1f,
-                    repathInterval
-                );
-
-            if (MoveToPosition(
-                lastKnownPosition,
-                investigateSpeed
-            ))
+            for (int i = 0; i < 4; i++)
             {
-                investigatePathNeeded = false;
+                int direction = (randomStart + i) % 4;
+                if (maze.cellWalls[cell.x, cell.y, direction]) continue;
+
+                Vector2Int next = cell + Directions[direction];
+                if (!InMaze(next)) continue;
+                if (pass == 0 && next == previousCell) continue;
+
+                Vector3 destination = new Vector3(
+                    next.x * maze.cellSize, agent.nextPosition.y,
+                    next.y * maze.cellSize);
+
+                if (!MoveTo(destination, patrolSpeed, 1.5f)) continue;
+
+                previousCell = cell;
+                hasPatrolTarget = true;
+                patrolStartTime = Time.time;
+                Log("Patrol: " + cell + " -> " + next);
+                return true;
             }
         }
+        return false;
+    }
 
-        // Look around at last known location
-        if (!investigatePathNeeded &&
-            HasReachedDestination())
+    private void Patrol()
+    {
+        if (hasPatrolTarget)
+        {
+            bool arrived = !agent.pathPending &&
+                HorizontalDistance(patrolTarget) <= 0.6f;
+            bool failed = !agent.pathPending && !agent.hasPath &&
+                Time.time - patrolStartTime > 0.5f;
+            bool timedOut = Time.time - patrolStartTime > 8f;
+
+            if (!arrived && !failed && !timedOut) return;
+
+            hasPatrolTarget = false;
+            nextPatrolTime = Time.time + 0.15f;
+            if (!arrived) agent.ResetPath();
+        }
+
+        if (Time.time < nextPatrolTime) return;
+        if (ChooseCorridor()) return;
+
+        // Works even when the object is used outside MazeGenerator.
+        for (int i = 0; i < 30; i++)
+        {
+            Vector2 offset = Random.insideUnitCircle * patrolRadius;
+            Vector3 target = agent.nextPosition + new Vector3(offset.x, 0f, offset.y);
+            if ((target - agent.nextPosition).sqrMagnitude < 4f) continue;
+            if (!MoveTo(target, patrolSpeed, 2f)) continue;
+            hasPatrolTarget = true;
+            patrolStartTime = Time.time;
+            Log("Patrol: fallback waypoint selected");
+            return;
+        }
+
+        nextPatrolTime = Time.time + 0.5f;
+        if (Time.time >= nextWarningTime)
+        {
+            Debug.LogWarning(name + ": Cannot find a reachable patrol point on NavMesh.");
+            nextWarningTime = Time.time + 3f;
+        }
+    }
+
+    private void Chase()
+    {
+        if (player == null) return;
+
+        Vector3 target = CanSeePlayer() ? player.position : lastKnownPosition;
+        float distance = HorizontalDistance(target);
+        bool charging = distance <= chargeRange;
+        float speed = charging ? chargeSpeed : chaseSpeed;
+        agent.speed = speed;
+        agent.acceleration = charging ? 45f : 25f;
+        if (charging && !wasCharging) Log("FAST CHARGE started, speed " + chargeSpeed);
+        wasCharging = charging;
+
+        if (Time.time < nextPathTime) return;
+        nextPathTime = Time.time + Mathf.Max(0.1f, repathInterval);
+        if (!MoveTo(target, speed, 2f) && Time.time >= nextWarningTime)
+        {
+            Debug.LogWarning(name + ": Could not calculate a path to Player.");
+            nextWarningTime = Time.time + 3f;
+        }
+    }
+
+    private void StartInvestigation(Vector3 position)
+    {
+        ChangeState(State.Investigate);
+        lastKnownPosition = position;
+        investigationEndTime = Time.time + investigateDuration;
+        needsInvestigationPath = true;
+        nextPathTime = 0f;
+    }
+
+    private void Investigate()
+    {
+        if (Time.time >= investigationEndTime)
+        {
+            ChangeState(State.Patrol);
+            nextPatrolTime = 0f;
+            return;
+        }
+
+        if (needsInvestigationPath && Time.time >= nextPathTime)
+        {
+            nextPathTime = Time.time + Mathf.Max(0.1f, repathInterval);
+            if (MoveTo(lastKnownPosition, investigateSpeed, 2f))
+                needsInvestigationPath = false;
+        }
+
+        if (!needsInvestigationPath && !agent.pathPending &&
+            HorizontalDistance(patrolTarget) <= 0.7f)
         {
             agent.isStopped = true;
             agent.updateRotation = false;
-
-            transform.Rotate(
-                0f,
-                90f * Time.deltaTime,
-                0f
-            );
+            transform.Rotate(0f, 90f * Time.deltaTime, 0f);
         }
     }
 
-    // =====================================
-    // EXPLOSION + PLAYER DAMAGE
-    // =====================================
+    private void HearFootstep(Vector3 position, float radius)
+    {
+        if (!ready || exploded || CanSeePlayer()) return;
+        if (HorizontalDistance(position) > radius) return;
+
+        if (state != State.Investigate)
+        {
+            StartInvestigation(position);
+            Log("heard footsteps; investigating");
+        }
+        else
+        {
+            if ((lastKnownPosition - position).sqrMagnitude > 1f)
+                needsInvestigationPath = true;
+            lastKnownPosition = position;
+            investigationEndTime = Time.time + investigateDuration;
+        }
+    }
+
+    private float HorizontalDistance(Vector3 position)
+    {
+        Vector3 offset = position - transform.position;
+        offset.y = 0f;
+        return offset.magnitude;
+    }
+
+    private bool CanSeePlayer()
+    {
+        if (player == null || !player.gameObject.activeInHierarchy) return false;
+        Vector3 offset = player.position - transform.position;
+        offset.y = 0f;
+        if (offset.magnitude > detectionRange) return false;
+        if (offset.sqrMagnitude > 0.001f &&
+            Vector3.Angle(transform.forward, offset) > fieldOfView * 0.5f)
+            return false;
+        return !WallBetweenPlayer();
+    }
+
+    private bool WallBetweenPlayer()
+    {
+        return player != null && WallBetween(
+            transform.position + Vector3.up * 0.7f,
+            player.position + Vector3.up * 0.7f);
+    }
+
+    private bool WallBetween(Vector3 start, Vector3 end)
+    {
+        if (mazeWalls == null)
+        {
+            GameObject walls = GameObject.Find("MazeWalls");
+            if (walls != null) mazeWalls = walls.transform;
+        }
+        if (mazeWalls == null) return false;
+
+        Vector3 direction = end - start;
+        if (direction.sqrMagnitude < 0.0001f) return false;
+
+        RaycastHit[] hits = Physics.RaycastAll(start, direction.normalized,
+            direction.magnitude, ~0, QueryTriggerInteraction.Ignore);
+        foreach (RaycastHit hit in hits)
+        {
+            if (hit.collider != null &&
+                hit.collider.transform.IsChildOf(mazeWalls)) return true;
+        }
+        return false;
+    }
 
     private void Explode()
     {
-        if (hasExploded)
-            return;
-
-        hasExploded = true;
-
+        if (exploded) return;
+        exploded = true;
         Debug.Log("BOOM! Boomer Exploded!");
 
-        if (player != null)
+        if (player != null && HorizontalDistance(player.position) <= explosionRadius
+            && !WallBetweenPlayer())
         {
-            float distance = Vector3.Distance(
-                transform.position,
-                player.position
-            );
-
-            bool blocked = WallBetween(
-                transform.position + Vector3.up * 0.5f,
-                player.position + Vector3.up * 0.5f
-            );
-
-            if (distance <= explosionRadius &&
-                !blocked)
-            {
-                PlayerHealth health =
-                    player.GetComponent<PlayerHealth>();
-
-                if (health == null)
-                {
-                    health =
-                        player.GetComponentInParent<PlayerHealth>();
-                }
-
-                if (health == null)
-                {
-                    health =
-                        player.GetComponentInChildren<PlayerHealth>();
-                }
-
-                if (health != null)
-                {
-                    health.TakeDamage(
-                        explosionDamage
-                    );
-                }
-                else
-                {
-                    Debug.LogWarning(
-                        "PlayerHealth component not found!"
-                    );
-                }
-            }
+            PlayerHealth health = player.GetComponent<PlayerHealth>();
+            if (health == null) health = player.GetComponentInParent<PlayerHealth>();
+            if (health == null) health = player.GetComponentInChildren<PlayerHealth>();
+            if (health != null) health.TakeDamage(explosionDamage);
+            else Debug.LogWarning("Boomer: PlayerHealth component not found.");
         }
 
-        // Explosion particle effect
         if (explosionEffect != null)
         {
-            GameObject effect = Instantiate(
-                explosionEffect,
-                transform.position,
-                Quaternion.identity
-            );
-
+            GameObject effect = Instantiate(explosionEffect,
+                transform.position + Vector3.up * 0.7f, Quaternion.identity);
+            effect.SetActive(true);
+            foreach (ParticleSystem particles in effect.GetComponentsInChildren<ParticleSystem>(true))
+                particles.Play(true);
             Destroy(effect, 3f);
         }
+        else Debug.LogWarning("Boomer: Explosion Effect prefab is not assigned.");
 
         Destroy(gameObject);
     }
 
-    // =====================================
-    // VISION + PATROL GIZMOS
-    // =====================================
-
-    private void OnDrawGizmosSelected()
+    private void Log(string message)
     {
-        Vector3 origin =
-            transform.position +
-            Vector3.up * 0.5f;
-
-        Vector3 forward = transform.forward;
-        forward.y = 0f;
-
-        if (forward.sqrMagnitude < 0.001f)
-            return;
-
-        forward.Normalize();
-
-        float halfAngle = fieldOfView * 0.5f;
-
-        Gizmos.color = Color.yellow;
-
-        Vector3 previous =
-            origin +
-            Quaternion.Euler(
-                0f,
-                -halfAngle,
-                0f
-            ) * forward * detectionRange;
-
-        for (int i = 1; i <= 24; i++)
-        {
-            float angle =
-                -halfAngle +
-                fieldOfView * i / 24f;
-
-            Vector3 ray =
-                Quaternion.Euler(
-                    0f,
-                    angle,
-                    0f
-                ) * forward;
-
-            Vector3 next =
-                origin + ray * detectionRange;
-
-            Gizmos.DrawLine(previous, next);
-
-            previous = next;
-        }
-
-        Gizmos.color = Color.green;
-
-        Gizmos.DrawLine(
-            origin,
-            origin + forward * detectionRange
-        );
-
-        Gizmos.color = Color.cyan;
-
-        Vector3 center = Application.isPlaying
-            ? homePosition
-            : transform.position;
-
-        Gizmos.DrawWireSphere(
-            center,
-            patrolRadius
-        );
-
-        if (Application.isPlaying &&
-            currentState == AIState.Investigate)
-        {
-            Gizmos.color = Color.red;
-
-            Gizmos.DrawSphere(
-                lastKnownPosition,
-                0.25f
-            );
-        }
+        if (showLogs) Debug.Log(name + ": " + message);
     }
 }

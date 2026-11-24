@@ -32,6 +32,11 @@ public class ZombieMovement : MonoBehaviour
     public float searchDuration = 5f;
     private float searchTimer;
     private bool isInitialized;
+    [Header("Attack")]
+    public int damageAmount = 10;
+    public float damageInterval = 1f;
+
+    private float nextDamageTime;
 
     Vector2Int GetRandomNearbyCell(Vector2Int currentCell)
     {
@@ -204,7 +209,6 @@ public class ZombieMovement : MonoBehaviour
         else if (currentState == ZombieState.Chase)
         {
             currentState = ZombieState.Intercept;
-            searchTimer = searchDuration;
         }
     }
 
@@ -225,15 +229,13 @@ public class ZombieMovement : MonoBehaviour
         // INTERCEPT
         if (currentState == ZombieState.Intercept)
         {
-            if (searchTimer > 0)
+            agent.SetDestination(lastKnownPlayerPosition);
+
+            if (!agent.pathPending &&
+                agent.remainingDistance <= waypointTolerance)
             {
-                searchTimer -= Time.deltaTime;
-                agent.SetDestination(lastKnownPlayerPosition);
-            }
-            else
-            {
-                currentState = ZombieState.Patrol;
-                currentPath = null;
+                currentState = ZombieState.Search;
+                searchTimer = searchDuration;
             }
 
             return;
@@ -371,14 +373,33 @@ public class ZombieMovement : MonoBehaviour
     }
     void OnEnable()
     {
-        SoundManager.OnSoundHeard += HearSound;
+        Movement.OnPlayerFootstep += HearSound;
     }
 
     void OnDisable()
     {
-        SoundManager.OnSoundHeard -= HearSound;
+        Movement.OnPlayerFootstep -= HearSound;
     }
 
+    private void OnTriggerStay(Collider other)
+    {
+        if (!other.CompareTag("Player"))
+            return;
+
+        if (Time.time < nextDamageTime)
+            return;
+
+        PlayerHealth health = other.GetComponent<PlayerHealth>();
+
+        if (health == null)
+            health = other.GetComponentInParent<PlayerHealth>();
+
+        if (health == null)
+            return;
+
+        health.TakeDamage(damageAmount);
+        nextDamageTime = Time.time + damageInterval;
+    }
     void HearSound(Vector3 soundPosition, float soundRadius)
     {
         float distance = Vector3.Distance(transform.position, soundPosition);
